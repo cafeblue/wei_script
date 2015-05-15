@@ -1,0 +1,559 @@
+#!/usr/bin/perl
+# get_fasta_stats - Get statistics of contigs in Fasta format.
+#
+# Written by: James D. White, University of Oklahoma, Advanced Center for
+#   Genome Technology
+#
+#Date Written: Jul 27, 1999
+#
+# 001025 - JDW - Added GC% and non-ACGT base calculations
+#
+$Date_Last_Modified = "Oct 25, 2000";
+
+
+######################## Customization Parameters ###########################
+
+$SHORTEN_CONTIG_NAMES = 0;	# -s, shorten contig names?
+$TOTALS = 0;			# -t, output totals and headers?
+$QUAL = 0;			# -q, use fasta qual file for quality info?
+$PHRED_SCORE = 20;		# -p #, phred/phrap score considered "good"?
+				#     (-p is used only if -q is specified)
+
+########## Operating System specific ##########
+
+$directory_separator = '/';	# For Unix
+
+##################### End of Customization Parameters #######################
+
+
+$full_command_name = $0;
+if ($full_command_name =~ m"(^|${directory_separator})([^${directory_separator}]*)$")
+  {
+  $my_name = $2;
+  }
+else
+  {
+  $my_name = 'get_fasta_stats';
+  }
+
+while ($ARGV[0] =~ /^-/)
+  {
+  $flag = shift @ARGV;
+  $f = substr($flag, 1, 1);
+  $value = $flag;
+  substr($value, 0, 2) = '';
+
+  if ($f eq 's')		# -s shorten contig names
+    {
+    $SHORTEN_CONTIG_NAMES = 1;
+    }
+  elsif ($f eq 't')		# -t output totals
+    {
+    $TOTALS = 1;
+    }
+  elsif ($f eq 'q')		# -q contig quality scores
+    {
+    $QUAL = 1;
+    }
+  elsif ($f eq 'p')		# -p #, phred score considered "good"
+    {				#       used only if -q specified
+    if ($value eq '')
+      {
+      $value = shift @ARGV;
+      }
+    if ($value !~ /^\d\d?$/)
+      {
+      &display_help("Invalid 'Phred_score': -p $value");
+      exit 2;
+      }
+    $PHRED_SCORE = $value;
+    }
+  elsif ($f eq 'h')		# -h	(help)
+    {
+    &display_more_help;
+    exit 0;
+    }
+  else
+    {
+    &display_help("Invalid flag: $flag");
+    exit 2;
+    }
+  }
+
+$fasta_input_file = shift @ARGV;
+$fasta_input_file = '-' if (!$fasta_input_file);
+open(FASTAIN, $fasta_input_file) || die("Can't open fasta_input_file: '$fasta_input_file'\n");
+
+if ($QUAL)
+  {
+  if ($fasta_input_file ne '-')
+    {
+    if (!open(QUALIN, "${fasta_input_file}.qual"))
+      {
+      print STDERR "Can't open fasta quality input file: '${fasta_input_file}.qual'.\n  Quality reporting turned off\n";
+      $QUAL = 0;
+      }
+    }
+  else
+    {
+    print STDERR "Can't open fasta quality input file for standard input.\n  Quality reporting turned off\n";
+    $QUAL = 0;
+    }
+  }
+
+
+$Num_Contigs = 0;
+$Total_Bases = 0;
+$Total_ACGT = 0;
+$Total_GC = 0;
+$Max_Bases = -1;
+$Min_Bases = -1;
+if ($QUAL)
+  {
+  $Min_Qual = -1;
+  $Max_Qual = -1;
+  $Phred_Bases = 0;
+  $Error_Sum = 0;
+  $Error_Bases = 0;
+  $ErrorsP10K = 0;
+  $Edited_Bases = 0;
+  @QualBins = ();
+  for ($q = 99; $q >= 0; $q--)
+    {
+    $QualBins[$q] = 0;
+    }
+  }
+
+$found_data = -1;
+$header = '';
+$contig = '';
+$sequence = '';
+$line_num = 0;
+if ($QUAL)
+  {
+  $Qline = <QUALIN>;
+  $Qline_num = 1;
+  }
+while ($line = <FASTAIN>)
+  {
+  chomp $line;
+  $line_num++;
+  if ($line =~ /^>/)
+    {
+    if ($found_data < 0)	# first input line?
+      {
+      &print_headers if $TOTALS;
+      }
+    else			# else process previously read contig
+      {
+      if ($QUAL && length($sequence) != @Quality)
+        {
+        print STDERR "Fasta sequence and quality file lengths do not match on\n  contig='$contig'\n";
+        exit 2;
+        }
+      &process_contig($contig, $sequence) if $contig;
+      }
+    $found_data = 0;		# Now set up new contig
+    $Num_Contigs++;
+    $header = $line;
+    if ($header =~ m/^>(\S+)/)
+      {
+      $contig = $1;
+      }
+    else
+      {
+      print STDERR "Error: Invalid fasta_input_file format: '$fasta_input_file'\n  Fasta input line number=$line_num\n";
+      exit 2;
+      }
+    $sequence = '';
+    if ($QUAL)
+      {
+      chomp($Qline);
+      $Qheader = $Qline;
+      if ($Qheader =~ m/^>(\S+)/)
+        {
+        $Qcontig = $1;
+        if ($contig ne $Qcontig)
+          {
+          print STDERR "Fasta sequence and quality files do not match on contig header number $Num_Contigs\n  Sequence contig='$contig', Quality contig='$Qcontig'\n";
+          exit 2;
+          }
+        }
+      else
+        {
+        print STDERR "Error: Invalid fasta_qual_input_file format: '${fasta_input_file}.qual'\nQline_num=$Qline_num, Qline='$Qline'\n";
+        exit 2;
+        }
+      $Qline = <QUALIN>;
+      $Qline_num++;
+      $Quality = '';
+      while (length($Qline) && $Qline !~ /^>/)
+        {
+        chomp($Qline);
+        $Quality .= ' ' . $Qline;
+        $Qline = <QUALIN>;
+        $Qline_num++;
+        }
+      $Quality =~ s/^\s+//;
+      $Quality =~ s/\s+$//;
+      @Quality = split(' ', $Quality);
+      }
+    }
+  else # ($line !~ /^>/)
+    {
+    if ($found_data < 0)
+      {
+      print STDERR "Error: Invalid fasta_input_file format: '$fasta_input_file'\n";
+      exit 2;
+      }
+    $line =~ s/\s//g;
+    $sequence .= $line;
+    $found_data = 1;
+    }
+  } # end while
+if ($contig)
+  {
+  &process_contig($contig, $sequence);
+  }
+else
+  {
+  print STDERR "Error: Empty fasta_input_file: '$fasta_input_file'\n";
+  exit 2;
+  }
+
+close(FASTAIN);
+close(QUALIN) if $QUAL;
+
+&print_totals if $TOTALS;
+
+exit 0;
+
+
+###########################################################################
+# process_contig - compute contig statistics and accumulate overall stats.
+###########################################################################
+
+sub process_contig
+  {
+  my($contig, $sequence) = @_;
+  my($len, $ACGTbases, $ATbases, $GCbases, $nonACGTbases);
+
+  # Remove Contig name prefix?
+  $contig =~ s/^.*Contig/Contig/ if $SHORTEN_CONTIG_NAMES;
+  $len = length($sequence);
+  $Total_Bases += $len;
+  $Max_Bases = $len if $Max_Bases < $len;
+  $Min_Bases = $len if $Min_Bases > $len || $Min_Bases < 0;
+
+  $ATbases = ($sequence =~ tr/aAtT/aAtT/);
+  $GCbases = ($sequence =~ tr/cCgG/cCgG/);
+  $ACGTbases = $ATbases + $GCbases;
+  $nonACGTbases = $len - $ACGTbases;
+  if ($ACGTbases)
+    {
+    $GC_per_cent = sprintf "%.1f%%", 100 * $GCbases / $ACGTbases;
+    }
+  else
+    {
+    $GC_per_cent = '-';
+    }
+  $Total_GC += $GCbases;
+  $Total_ACGT += $ACGTbases;
+
+  if ($QUAL)
+    {
+    my($min_qual, $max_qual, $phred_bases, $q, $error_sum, $error_bases, $errorsp10k, $edited_bases);
+    my(@qualbins) = ();
+    $min_qual = -1;
+    $max_qual = -1;
+    $phred_bases = 0;
+    for ($q = 99; $q >= 0; $q--)
+      {
+      $qualbins[$q] = 0;
+      }
+    foreach $q (@Quality)
+      {
+      $qualbins[$q]++;
+      $min_qual = $q if $min_qual > $q || $min_qual < 0;
+      $max_qual = $q if $max_qual < $q && $q < 98;
+      $phred_bases++ if ($q >= $PHRED_SCORE && $q < 98);
+      }
+    $error_sum = 0;
+    $error_bases = 0;
+    for ($q = 97; $q >= 0; $q--)
+      {
+      $qb = $qualbins[$q];
+      if ($qb)
+        {
+        $error_sum += $qb * (10.0 ** ($q / -10.0));
+        $error_bases += $qb;
+        $QualBins[$q] += $qb;
+        }
+      }
+    if ($error_bases > 0)
+      {
+      $errorsp10k = ($error_sum / $error_bases) * 10000;
+      }
+    else
+      {
+      $errorsp10k = 0;
+      }
+    if ($errorsp10k >= 1000)
+      {
+      $errorsp10k = int($errorsp10k + 0.5);
+      }
+    else
+      {
+      $errorsp10k = int(100.0 * $errorsp10k + 0.5) / 100.0;
+      }
+    $edited_bases = $qualbins[98] + $qualbins[99];
+    $contig .= ' ' if length($contig) == 7;
+    print STDOUT "$contig\t$len\t$errorsp10k\t$edited_bases\t$phred_bases\t$min_qual\t$max_qual\t$GC_per_cent\t$nonACGTbases\n";
+    $Min_Qual = $min_qual if $Min_Qual > $min_qual || $Min_Qual < 0;
+    $Max_Qual = $max_qual if $Max_Qual < $max_qual;
+    $Phred_Bases += $phred_bases;
+    $QualBins[98] += $qualbins[98];
+    $QualBins[99] += $qualbins[99];
+    }
+  else
+    {
+    print STDOUT "$contig\t$len\t$GC_per_cent\t$nonACGTbases\n";
+    }
+  } # end process_contig
+
+
+###########################################################################
+# print_headers - print output headers.
+###########################################################################
+
+sub print_headers
+  {
+  print STDOUT "\n$my_name - Last Modified: $Date_Last_Modified\n\n";
+  print STDOUT "Contig statistics for fasta file:'$fasta_input_file'\n";
+  if ($QUAL)
+    {
+    print STDOUT "      and for fasta quality file:'${fasta_input_file}.qual'\n";
+    print STDOUT "\nContig   \tContig\tConsed\tEdited\tPhred$PHRED_SCORE\tMinimum\tMaximum\t\tNon-ACGT\n";
+    print STDOUT "Name    \tLength\tErr/10K\tBases\tBases\tQuality\tQuality\tGC%\tbases\n";
+    }
+  else
+    {
+    print STDOUT "\nContig  \tContig\t\tNon-ACGT\n";
+    print STDOUT "Name    \tLength\tGC%\tbases\n";
+    }
+  } # end print_headers
+
+
+###########################################################################
+# print_totals - print total statistics.
+###########################################################################
+
+sub print_totals
+  {
+  print STDOUT "\nNumber of Contigs=$Num_Contigs, Total bp=$Total_Bases, Shortest=$Min_Bases, Longest=$Max_Bases,\n";
+  if ($Total_ACGT)
+    {
+    $GC_per_cent = sprintf "%.1f%%", 100 * $Total_GC / $Total_ACGT;
+    }
+  else
+    {
+    $GC_per_cent = '-';
+    }
+  $Total_nonACGT = $Total_Bases - $Total_ACGT;
+  print STDOUT "Average GC%=$GC_per_cent, Non-ACGT bases=$Total_nonACGT";
+
+  if ($QUAL)
+    {
+    my($q, $qb);
+    for ($q = 97; $q >= 0; $q--)
+      {
+      $qb = $QualBins[$q];
+      if ($qb)
+        {
+        $Error_Sum += $qb * (10.0 ** ($q / -10.0));
+        $Error_Bases += $qb;
+        }
+      }
+    if ($Error_Bases > 0)
+      {
+      $ErrorsP10K = ($Error_Sum / $Error_Bases) * 10000;
+      }
+    else
+      {
+      $ErrorsP10K = 0;
+      }
+    if ($ErrorsP10K >= 1000)
+      {
+      $ErrorsP10K = int($ErrorsP10K + 0.5);
+      }
+    else
+      {
+      $ErrorsP10K = int(100.0 * $ErrorsP10K + 0.5) / 100.0;
+      }
+    $Edited_Bases = $QualBins[98] + $QualBins[99];
+    print STDOUT ",\nErrors/10K=$ErrorsP10K, Edited bp=$Edited_Bases, Total Phred/Phrap$PHRED_SCORE bp=$Phred_Bases,\nMinimum Contig Quality=$Min_Qual, Maximum Contig Quality=$Max_Qual";
+    }
+  print STDOUT "\n\n";
+  } # end print_totals
+
+
+###########################################################################
+# display_help
+###########################################################################
+
+sub display_help
+  {
+  my($msg) = @_;
+  print STDERR "\n$msg\n" if $msg;
+  print STDERR <<EOF;
+
+USAGE: $my_name [-q [-p phred_score]] [-s] [-t] [fasta_input_file]
+              or
+       $my_name -h
+
+
+EOF
+  } # end display_help
+
+
+###########################################################################
+# display_help
+###########################################################################
+
+sub display_more_help
+  {
+  print STDOUT <<EOF;
+
+$my_name - Get statistics for contigs in Fasta format.  The contig
+names optionally may be shortened by removing everything before the word
+"Contig" (-s).  Summary statistics (totals) may be displayed (-t).  A
+fasta quality file can also be read to give error and quality statistics
+(-q).  A minimum Phred/Phrap score (-p phred_score) can be specified if
+quality scores are read.  Base pairs with a Phred/Phrap quality value of
+98 or 99 are counted as edited bases, but are not used to compute other
+quality statistics.
+
+If quality scores are not used, only the contig name, length, GC%, and
+the number of bases that are not A, C, G, or T are listed for each contig.
+The GC% uses only A, C, G, and T bases in the calculation.  If totals are
+requested (-t), the number of contigs, total length of all contigs, lengths
+of the shortest and longest contigs, average GC%, and total number of
+non-ACGT bases are also output.  Column headings are displayed for the
+contigs, if totals are requested.
+
+If quality scores are used (-q), the Consed Errors/10Kb, the number of
+edited bases (those bases with a quality score of 98 or 99), the number
+of Phred/Phrap(#) bases, and the minimum and maximum Phred/Phrap scores
+are listed for each contig along with the contig name and length.
+Phred/Phrap(#) bases is the count of the number of bases with a Phred/Phrap
+base quality of (#) or greater.  This Phred/Phrap score (#) defaults to ${PHRED_SCORE},
+but a different value can be specified as '-p new#'.
+
+If both quality scores are used (-q) and totals are requested (-t), the
+Consed Errors/10Kb, the number of Phred/Phrap(#) bases, and the minimum
+and maximum Phred/Phrap scores are output for the entire file along with
+the total contig count and size information listed above.
+
+
+USAGE: $my_name [-q [-p phred_score]] [-s] [-t] [fasta_input_file]
+              or
+       $my_name -h           <== What you are reading
+
+  where 'fasta_input_file' is the name of the input sequence file in Fasta
+            format, which contains the contigs to be processed.
+            \u$my_name will also read a Fasta quality file named:
+            "'fasta_input_file'.qual".  If 'fasta_input_file' is omitted,
+            standard input will be used, but a quality file will not be read.
+
+
+OPTIONS:
+
+  -s  The contig names will be shortened by removing any prefix before the
+      word "Contig", i.e., "gono.fasta.screen.Contig26" becomes "Contig26".
+
+  -t  Output total fasta file statistics, as well as individual contig
+      statistics.  Column headings for the contigs will also be displayed.
+
+  -q  Compute and output quality statistics, using a Fasta quality file
+      named: "'fasta_input_file'.qual".  If the Fasta quality file cannot
+      be opened or the 'fasta_input_file' is read from standard input, -q
+      is ignored.
+
+  -p  Specify a threshhold phred/Phrap score.  For example, the default
+      value is ${PHRED_SCORE}.  \u$my_name will then display a Phred/Phrap${PHRED_SCORE}
+      score, which is a count of the number of bases with a Phred/Phrap
+      score of ${PHRED_SCORE} or better.  '-p 30' would specify that a
+      Phred/Phrap30 score should be computed instead, as a count of the
+      number of bases with a base quality score of 30 or better.  -p is
+      ignored if a Fasta quality file is not read.
+
+
+EXAMPLES:
+
+\$ $my_name b121i21.fasta.screen.contigs
+
+will read the fasta sequence file 'b121i21.fasta.screen.contigs' and
+display only the full contig names, lengths, and GC percentages, and number
+of bases that are not A, C, G, or T.
+
+   b121i21.fasta.screen.Contig1	68	44.1%	0
+   b121i21.fasta.screen.Contig2	3217	53.5%	3
+   b121i21.fasta.screen.Contig3	12452	46.2%	0
+   b121i21.fasta.screen.Contig4	29839	46.5%	0
+   b121i21.fasta.screen.Contig5	65793	46.8%	0
+
+\$ $my_name -q -t -s p109l3.fasta.screen.contigs
+
+will read the fasta sequence file 'p109l3.fasta.screen.contigs' and the
+fasta quality file 'p109l3.fasta.screen.contigs.qual', then compute
+contig quality statistics, and summary (total) length and quality
+statistics.  Displayed contig names will be shortened by removing any
+prefix before the word "Contig".
+
+
+   get_fasta_stats - Last Modified: $Date_Last_Modified
+
+   Contig statistics for fasta file:'b121i21.fasta.screen.contigs'
+         and for fasta quality file:'b121i21.fasta.screen.contigs.qual'
+
+   Contig   	Contig	Consed	Edited	Phred20	Minimum	Maximum		Non-ACGT
+   Name    	Length	Err/10K	Bases	Bases	Quality	Quality	GC%	bases
+   Contig1 	68	5588	0	30	0	90	44.1%	0
+   Contig2 	3217	1534	0	2705	0	90	53.5%	3
+   Contig3 	12452	544.45	0	11691	0	90	46.2%	0
+   Contig4 	29839	98.33	0	29540	0	90	46.5%	0
+   Contig5 	65793	75.64	0	65252	0	90	46.8%	0
+
+   Number of Contigs=5, Total bp=111369, Shortest=68, Longest=65793,
+   Average GC%=46.9%, Non-ACGT bases=3,
+   Errors/10K=179.63, Edited bp=0, Total Phred/Phrap20 bp=109218,
+   Minimum Contig Quality=0, Maximum Contig Quality=90
+
+\$ $my_name -q -t -s -p 30 p109l3.fasta.screen.contigs
+
+is the same as the previous example, except a Phred/Phrap30 score is
+computed instead.
+
+   get_fasta_stats - Last Modified: $Date_Last_Modified
+
+   Contig statistics for fasta file:'b121i21.fasta.screen.contigs'
+         and for fasta quality file:'b121i21.fasta.screen.contigs.qual'
+
+   Contig   	Contig	Consed	Edited	Phred30	Minimum	Maximum		Non-ACGT
+   Name    	Length	Err/10K	Bases	Bases	Quality	Quality	GC%	bases
+   Contig1 	68	5588	0	30	0	90	44.1%	0
+   Contig2 	3217	1534	0	2671	0	90	53.5%	3
+   Contig3 	12452	544.45	0	11595	0	90	46.2%	0
+   Contig4 	29839	98.33	0	29509	0	90	46.5%	0
+   Contig5 	65793	75.64	0	65096	0	90	46.8%	0
+
+   Number of Contigs=5, Total bp=111369, Shortest=68, Longest=65793,
+   Average GC%=46.9%, Non-ACGT bases=3,
+   Errors/10K=179.63, Edited bp=0, Total Phred/Phrap30 bp=108901,
+   Minimum Contig Quality=0, Maximum Contig Quality=90
+
+
+DATE LAST MODIFIED: $Date_Last_Modified
+
+EOF
+  } # end display_more_help

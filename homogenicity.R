@@ -1,0 +1,7 @@
+homo <- read.table(commandArgs(TRUE)[1])
+title <- paste(c("Coverage Distribution of Sample ", commandArgs(TRUE)[2]), sep="")
+pdf(commandArgs(TRUE)[3], width=8, height=8)
+barplot(homo[[2]], space=0, col="#8C6CA8", main=title, xlab = "Relative Position of Genes (5\' -> 3\')", ylab="Coverage", ylim=c(0,max(homo[[2]])*1.2),  cex.axis=.7, cex.names=.7 )
+L <- c(0,4,8,12,16,20)
+N <- c(0,0.2,0.4,0.6,0.8,1)
+axis(side=1,at=L,labels=N)
